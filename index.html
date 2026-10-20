@@ -755,6 +755,8 @@ body[data-device="phone"] .search-box{display:none}
 .subtab.active{color:var(--primary);border-bottom-color:var(--primary)}
 .subview{display:none}
 .subview.active{display:block;animation:viewIn .25s ease}
+/* Điện thoại: panel 3D cao hơn để dễ nhìn */
+body[data-device="phone"] #server-twin { height: 58vh; min-height: 360px; }
 
 .page-header{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;margin-bottom:28px;flex-wrap:wrap}
 .page-header h1{font-size:32px;font-weight:800;color:var(--text);letter-spacing:-.8px;line-height:1.15}
@@ -1178,7 +1180,8 @@ tbody tr:last-child td{border-bottom:none}
                 <div class="card-title">Digital Twin — Phòng server</div>
                 <div class="card-subtitle">Mô hình 3D realtime · nhiệt độ / độ ẩm / quạt / bơm</div>
               </div>
-              <button class="btn btn-ghost" onclick="twin.resetView()">🗺 Góc nhìn toàn cảnh</button>
+              <button class="btn btn-ghost" onclick="window.twin &amp;&amp; window.twin.resetView()">🗺 Góc nhìn toàn cảnh</button>
+              <button class="btn btn-ghost" onclick="window.twin &amp;&amp; window.twin.setView('plant')">⚙ Thiết bị ngoài</button>
               <span class="kpi-badge gray" id="twin-status">3D: đang tải…</span>
             </div>
             <div id="server-twin" style="height:460px"></div>
@@ -1824,6 +1827,11 @@ function applyDevice(dev) {
   var p = $('picker'), a = $('app');
   if (p) p.classList.add('hidden');
   if (a) a.classList.add('ready');
+  // #app vừa hiện -> canvas 3D (nếu đã mount khi còn ẩn) cần đo lại kích thước
+  setTimeout(function () {
+    try { if (window.mountTwin) window.mountTwin(); } catch (e) {}
+    try { ensureTwinVisible(); } catch (e) {}
+  }, 600);
 }
 
 var pickerCards = document.querySelectorAll('.picker-card');
@@ -1843,10 +1851,10 @@ for (var pi = 0; pi < pickerCards.length; pi++) {
 if (state.device) {
   applyDevice(state.device);
 } else {
-  // Chưa có lựa chọn lưu (mở bằng IP/file -> localStorage là origin khác):
-  // tự chọn theo bề rộng màn hình để #app.ready được set -> trang không bị trắng.
-  // Đổi thiết bị vẫn làm được trong tab Cài đặt.
-  applyDevice((window.innerWidth && window.innerWidth < 760) ? 'phone' : 'laptop');
+  // Chưa chọn thiết bị -> hiện màn chào (Laptop / Điện thoại).
+  // Lưu ý: localStorage gắn theo origin, mở bằng IP/file là mất lựa chọn cũ.
+  var pk = $('picker');
+  if (pk) { pk.classList.remove('hidden'); pk.removeAttribute('style'); }
 }
 
 window.switchDevice = function(dev) {
@@ -2861,30 +2869,42 @@ function historyIndexByKey(key) {
 /* Trạng thái 3D: WebGL2 / WebGL1 / không có WebGL / lỗi runtime */
 function twinStatusText() {
   var gl = window.__twinGL || 'unknown';
-  if (window.__twinError) return '⚠ 3D lỗi: ' + String(window.__twinError).slice(0, 50);
-  if (document.querySelector('.srt-plan')) return '2D: OK (máy không có WebGL)';
   var c = document.querySelector('#server-twin canvas');
-  if (!c) return '⚠ 3D: không có canvas (' + gl + ')';
-  if (c.clientWidth < 10) return '3D: đang tải… (' + gl + ')';
+  if (!c) return gl === 'webgl2' ? '⚠ Không tạo được canvas 3D' : '⚠ Không tạo được WebGL (hiện tại: ' + gl + ')';
+  // R3F chỉ set kích thước khi đo được container -> so với host, không so với 300x150 mặc định
+  var host = document.getElementById('server-twin');
+  var hw = host ? host.clientWidth : 0;
+  var hh = host ? host.clientHeight : 0;
+  if (!hw || !hh || c.clientWidth < hw * 0.9 || c.clientHeight < hh * 0.9) return '3D: đang tải… (' + gl + ')';
   return '3D: OK (' + gl + ')';
 }
 
-/* Canvas 3D có thể được mount khi panel đang ẩn (0x0) -> remount một lần cho đúng kích thước */
+/* Canvas 3F có thể được mount khi panel đang ẩn (0x0) -> R3F tự đo lại bằng ResizeObserver.
+   Một timer duy nhất để không chạy nhiều chuỗi song song. */
+var twinCheckTimer = null;
 function ensureTwinVisible() {
   try {
+    if (!window.twin) return;   // 3D không bật
+    var badge = document.getElementById('twin-status');
     var c = document.querySelector('#server-twin canvas');
-    if (!c || c.clientWidth < 10 || c.clientHeight < 10) {
-      if (window.twin && twin.resize) twin.resize();
-      var badge = document.getElementById('twin-status');
-      if (badge) badge.textContent = '3D: đang tải…';
-      setTimeout(function(){
-        var b = document.getElementById('twin-status');
-        if (b) b.textContent = twinStatusText();
-      }, 1800);
+    if (!c) {
+      // không có canvas (không tạo được WebGL hoặc bundle lỗi) -> báo ngay, đừng poll vô hạn
+      if (badge) badge.textContent = twinStatusText();
       return;
     }
-    var badge2 = document.getElementById('twin-status');
-    if (badge2) badge2.textContent = twinStatusText();
+    if (twinStatusText().indexOf('đang tải') !== -1) {
+      window.dispatchEvent(new Event('resize'));
+      window.__twinTries = (window.__twinTries || 0) + 1;
+      if (window.__twinTries <= 10) {
+        if (twinCheckTimer) clearTimeout(twinCheckTimer);
+        twinCheckTimer = setTimeout(ensureTwinVisible, 500);
+      } else if (badge) {
+        badge.textContent = '⚠ 3D không khởi tạo được';
+      }
+      return;
+    }
+    window.__twinTries = 0;
+    if (badge) badge.textContent = twinStatusText();
   } catch (e) {}
 }
 
@@ -2905,7 +2925,7 @@ function showSubview(name) {
 }
 
 function insertHistory(entry) {
-  twinPush(entry);   // Digital Twin: history là nguồn có nhiệt độ/độ ẩm thật
+  scheduleTwinPush();   // Digital Twin: đẩy số liệu mới nhất (debounce 400ms)
   var idx = historyIndexByKey(entry.key);
   if (idx >= 0) { state.history[idx] = entry; return; }
   var pos = state.history.length;
@@ -3031,7 +3051,7 @@ function startRealtime() {
         }
       }
       renderDashboard(); renderMonitoring(); renderReports(); renderDevices();
-      twinPush(state.current);
+      scheduleTwinPush();
     }, function(err) {
       console.error('[Firebase] Lỗi system_status:', err);
       state.firebaseOk = false;
@@ -3221,19 +3241,54 @@ window.addEventListener('error', function(e) {
   console.error('[Global error]', e.message || e.error);
 });
 </script>
-<!-- Digital Twin 3D (UMD drop-in, không cần React) -->
-<script src="assets/server-room-twin.umd.js"></script>
+<!-- Digital Twin 3D (UMD drop-in, không cần React) — chỉ chạy ở chế độ Laptop -->
+<script src="assets/server-room-twin.umd.js?v=20261020a" onerror="window.__twinLoadError = true"></script>
 <script>
-  var twin = ServerRoomTwin.mount(document.getElementById('server-twin'));
-  setTimeout(ensureTwinVisible, 1200);   // badge trạng thái 3D (OK / không hỗ trợ WebGL)
-  /* ERP -> twin: nguồn 1 = /system_status (fan/pump, không có nhiệt độ),
-     nguồn 2 = /history (nhiệt độ/độ ẩm thật của cảm biến SHT20) */
-  function twinPush(c){
-    if (!c || typeof twin === 'undefined') return;
-    var p = { fanStatus: !!c.fan, pumpStatus: !!c.pump };
-    if (typeof c.t === 'number' && isFinite(c.t)) p.temperature = c.t;
-    if (typeof c.h === 'number' && isFinite(c.h)) p.humidity = c.h;
-    twin.update(p);
+  if (window.__twinLoadError || typeof ServerRoomTwin === 'undefined') {
+    // Gói 3D không tải được (thiếu thư mục assets/ khi upload, hoặc sai đường dẫn)
+    var twErr = document.getElementById('twin-status');
+    if (twErr) twErr.textContent = '⚠ Không tải được assets/server-room-twin.umd.js';
+    var twPanel = document.getElementById('subview-twin');
+    if (twPanel) twPanel.style.display = 'none';
+  }
+  var twin = null;
+  function mountTwin() {
+    if (twin) return;
+    var host = document.getElementById('server-twin');
+    if (!host) return;
+    try {
+      twin = ServerRoomTwin.mount(host);
+    } catch (err) {
+      twin = null;
+      var tw = document.getElementById('twin-status');
+      if (tw) tw.textContent = '⚠ Không khởi tạo được mô hình 3D';
+      console.error('[twin] mount failed:', err);
+      return;
+    }
+    setTimeout(ensureTwinVisible, 1200);   // badge trạng thái 3D (OK / không hỗ trợ WebGL)
+  }
+  window.mountTwin = mountTwin;
+  // Chỉ mount khi #app đã hiện, nếu không canvas sẽ đo ra 0x0 rồi kẹt
+  if (!window.__twinLoadError && document.getElementById('app').classList.contains('ready')) mountTwin();
+  showSubview('twin');
+
+  /* ERP -> twin:
+     - trạng thái thiết bị (fan/pump) lấy từ /system_status (mỗi 1s)
+     - nhiệt độ/độ ẩm lấy từ bản ghi /history MỚI NHẤT (mỗi 5s)
+     Gộp chung + debounce 400ms để lúc mở trang không đẩy 300 bản ghi lịch sử. */
+  var twinPushTimer = null;
+  function scheduleTwinPush() {
+    if (twinPushTimer) return;
+    twinPushTimer = setTimeout(function () {
+      twinPushTimer = null;
+      if (!twin) return;
+      var cur = state.current || {};
+      var p = { fanStatus: !!cur.fan, pumpStatus: !!cur.pump };
+      var last = state.history[state.history.length - 1];
+      if (last && typeof last.t === 'number' && isFinite(last.t)) p.temperature = last.t;
+      if (last && typeof last.h === 'number' && isFinite(last.h)) p.humidity = last.h;
+      twin.update(p);
+    }, 400);
   }
 </script>
 </body>
